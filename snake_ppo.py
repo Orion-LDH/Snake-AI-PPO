@@ -17,6 +17,7 @@ from torch.distributions import Categorical
 from torch.utils.tensorboard import SummaryWriter
 import csv
 
+
 # ------------------------------------------------------------
 # 超参数（含 ICM）
 # ------------------------------------------------------------
@@ -30,7 +31,7 @@ class Cfg:
     WINDOW_H: int = GRID_H * CELL_SIZE
     FPS: int = 120
     # 训练
-    MAX_EPISODES: int = 50_000
+    MAX_EPISODES: int = 20_000
     SAVE_FREQ: int = 500
     LOG_FREQ: int = 10
     GAMMA: float = 0.995  # 更高的折扣因子，重视长期奖励
@@ -38,9 +39,9 @@ class Cfg:
     EPS_CLIP: float = 0.2
     VALUE_COEF: float = 0.5
     ENTROPY_COEF: float = 0.01
-    LR: float = 1e-4  # 调整学习率
-    BATCH_SIZE: int = 2048
-    MINI_BATCH: int = 256
+    LR: float = 2e-4  # 调整学习率
+    BATCH_SIZE: int = 4096
+    MINI_BATCH: int = 512
     K_EPOCHS: int = 8
     MAX_GRAD_NORM: float = 0.5
     # 网络
@@ -49,7 +50,7 @@ class Cfg:
     ACTION_DIM: int = 3
     # ICM
     ICM_FEATURE_DIM: int = 128
-    ICM_LR: float = 3e-4    # 调整 ICM 学习率
+    ICM_LR: float = 5e-4    # 调整 ICM 学习率
     ICM_BETA: float = 0.2
     ICM_ETA: float = 0.1    # 增强内在奖励影响
     # 渲染
@@ -719,7 +720,7 @@ def test(cfg: Cfg, model_path: str) -> None:
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 20)
 
-    episodes = 10
+    episodes = 100
     total_score = 0
     for ep in range(episodes):
         state = env.reset()
@@ -739,7 +740,7 @@ def test(cfg: Cfg, model_path: str) -> None:
             txt = font.render(f"Test Ep:{ep+1}/{episodes}  Score:{score}", True, Color.TEXT)
             screen.blit(txt, (10, 10))
             pygame.display.flip()
-            clock.tick(5) # 测试时放慢速度
+            clock.tick(30) # 测试时放慢速度
 
             if done:
                 break
@@ -765,4 +766,4 @@ if __name__ == "__main__":
         test(cfg, args.test)
     else:
         train(cfg)
-        test(cfg, "final.pt")
+
