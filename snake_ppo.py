@@ -39,18 +39,18 @@ class Cfg:
     EPS_CLIP: float = 0.2
     VALUE_COEF: float = 0.5
     ENTROPY_COEF: float = 0.01
-    LR: float = 2e-4  # 调整学习率
-    BATCH_SIZE: int = 4096
-    MINI_BATCH: int = 512
+    LR: float = 1e-4  # 调整学习率
+    BATCH_SIZE: int = 2048
+    MINI_BATCH: int = 256
     K_EPOCHS: int = 8
     MAX_GRAD_NORM: float = 0.5
     # 网络
-    STATE_DIM: int = 16 + 8 # 原有 16 维 + 8 个方向的身体信息
-    HIDDEN_DIM: int = 768  # 减小隐藏层维度
+    STATE_DIM: int = 24 
+    HIDDEN_DIM: int = 512  # 减小隐藏层维度
     ACTION_DIM: int = 3
     # ICM
     ICM_FEATURE_DIM: int = 128
-    ICM_LR: float = 5e-4    # 调整 ICM 学习率
+    ICM_LR: float = 3e-4    # 调整 ICM 学习率
     ICM_BETA: float = 0.2
     ICM_ETA: float = 0.1    # 增强内在奖励影响
     # 渲染
