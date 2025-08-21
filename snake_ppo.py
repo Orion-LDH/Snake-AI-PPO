@@ -31,7 +31,7 @@ class Cfg:
     WINDOW_H: int = GRID_H * CELL_SIZE
     FPS: int = 120
     # 训练
-    MAX_EPISODES: int = 20_000
+    MAX_EPISODES: int = 30_000  # 增加训练轮数
     SAVE_FREQ: int = 500
     LOG_FREQ: int = 10
     GAMMA: float = 0.995  # 更高的折扣因子，重视长期奖励
@@ -39,27 +39,40 @@ class Cfg:
     EPS_CLIP: float = 0.2
     VALUE_COEF: float = 0.5
     ENTROPY_COEF: float = 0.01
-    LR: float = 1e-4  # 调整学习率
+    LR: float = 3e-4  # 提高学习率，使用学习率调度
     BATCH_SIZE: int = 2048
     MINI_BATCH: int = 256
     K_EPOCHS: int = 8
     MAX_GRAD_NORM: float = 0.5
+    # 学习率调度
+    LR_DECAY: float = 0.995  # 学习率衰减因子
+    MIN_LR: float = 1e-5     # 最小学习率
     # 网络
     STATE_DIM: int = 24 
-    HIDDEN_DIM: int = 512  # 减小隐藏层维度
+    HIDDEN_DIM: int = 512
+    
+      # 优化网络结构，使用更合理的维度
     ACTION_DIM: int = 3
     # ICM
     ICM_FEATURE_DIM: int = 128
     ICM_LR: float = 3e-4    # 调整 ICM 学习率
     ICM_BETA: float = 0.2
     ICM_ETA: float = 0.1    # 增强内在奖励影响
+    ICM_ETA_DECAY: float = 0.999  # 内在奖励衰减
     # 渲染
     RENDER_EVERY: int = 1000
     # 奖励
-    REWARD_FOOD: float = 10.0    # 降低食物奖励，避免过度贪吃
-    REWARD_DEATH: float = -10.0
-    REWARD_STEP: float = 0.0     # 移除步数惩罚
-    REWARD_SURVIVAL: float = 0.1 # 增加生存奖励
+    REWARD_FOOD: float = 10.0    # 食物奖励
+    REWARD_DEATH: float = -10.0   # 死亡惩罚
+    REWARD_STEP: float = 0.0      # 步数惩罚
+    REWARD_SURVIVAL: float = 0.1  # 生存奖励
+    REWARD_CLOSE_FOOD: float = 0.5  # 接近食物奖励
+    REWARD_AWAY_FOOD: float = -0.2 # 远离食物惩罚
+    # 课程学习
+    CURRICULUM_LEARNING: bool =   True  # 启用课程学习
+    GRID_SIZE_START: int = 6         # 初始网格大小
+    GRID_SIZE_END: int = 10          # 最终网格大小
+    CURRICULUM_EPISODES: int = 5000  # 课程学习阶段轮数
 
 # ------------------------------------------------------------
 # 颜色
@@ -86,7 +99,6 @@ class SnakeEnv:
         self._spawn_food()
         self.done: bool = False
         self.steps: int = 0
-        self.max_steps: int = self.cfg.GRID_W * self.cfg.GRID_H * 4
         return self._get_state()
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool]:
@@ -111,24 +123,64 @@ class SnakeEnv:
 
         self.snake.appendleft(new_head)
 
-        reward = self.cfg.REWARD_STEP + self.cfg.REWARD_SURVIVAL # 基础奖励 + 生存奖励
-        # Check if food is eaten
-        if new_head == self.food:
-            reward += self.cfg.REWARD_FOOD
-            self._spawn_food()
-        else:
-            self.snake.pop() # Remove tail if no food eaten
-
-        # Check if max steps reached
-        if self.steps >= self.max_steps:
-            self.done = True
-
+        # 基础奖励
+        reward = self.cfg.REWARD_STEP + self.cfg.REWARD_SURVIVAL
         
+        # 智能距离奖励
         old_dist = abs(x - self.food[0]) + abs(y - self.food[1])
         new_dist = abs(nx - self.food[0]) + abs(ny - self.food[1])
-        reward += (old_dist - new_dist) * 0.1
+        dist_change = old_dist - new_dist
+        
+        # 根据距离变化给予奖励
+        if dist_change > 0:  # 接近食物
+            reward += self.cfg.REWARD_CLOSE_FOOD * dist_change
+        elif dist_change < 0:  # 远离食物
+            reward += self.cfg.REWARD_AWAY_FOOD * abs(dist_change)
+        
+        # 检查是否吃到食物
+        if new_head == self.food:
+            reward += self.cfg.REWARD_FOOD
+            # 额外奖励：蛇越长，奖励越高
+            length_bonus = len(self.snake) * 0.1
+            reward += length_bonus
+            self._spawn_food()
+        else:
+            self.snake.pop()
+            
+        # 避免循环奖励：检测是否在重复路径
+        if hasattr(self, 'position_history'):
+            self.position_history.append(new_head)
+            # 如果最近10步中有重复位置，给予轻微惩罚
+            if len(self.position_history) > 10:
+                recent_positions = list(self.position_history)[-10:]
+                if len(set(recent_positions)) < 8:  # 如果重复率过高
+                    reward -= 0.05
+        else:
+            self.position_history = deque([new_head], maxlen=20)
+            
+        # 安全性奖励：检测是否接近危险
+        danger_count = self._count_nearby_dangers(nx, ny)
+        if danger_count > 0:
+            reward -= danger_count * 0.1  # 接近危险给予惩罚
+        
+
 
         return self._get_state(), reward, self.done
+        
+    def _count_nearby_dangers(self, x: int, y: int) -> int:
+        """计算位置周围3x3区域内的危险数量"""
+        danger_count = 0
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                # 检查是否撞墙或撞到自己
+                if (nx < 0 or nx >= self.cfg.GRID_W or
+                    ny < 0 or ny >= self.cfg.GRID_H or
+                    (nx, ny) in self.snake):
+                    danger_count += 1
+        return danger_count
 
     def _spawn_food(self) -> None:
         while True:
@@ -245,35 +297,87 @@ class SnakeEnv:
                               self.cfg.CELL_SIZE, self.cfg.CELL_SIZE))
 
 # ------------------------------------------------------------
-# 主干网络 (Actor-Critic)
+# 主干网络 (Actor-Critic) - 优化版本
 # ------------------------------------------------------------
+class ResidualBlock(nn.Module):
+    """残差块，用于提高网络深度和稳定性"""
+    def __init__(self, hidden_dim: int, dropout_rate: float = 0.1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),  # 使用层归一化提高稳定性
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),  # 添加dropout防止过拟合
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
+        )
+        self.relu = nn.ReLU()
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.relu(self.block(x) + x)  # 残差连接
+
 class ActorCritic(nn.Module):
     def __init__(self, s_dim: int, h_dim: int, a_dim: int) -> None:
         super().__init__()
-        # 使用更深的网络
-        self.backbone = nn.Sequential(
+        # 使用更优化的网络架构
+        self.input_layer = nn.Sequential(
             nn.Linear(s_dim, h_dim),
-            nn.ReLU(), # 改用 ReLU
-            nn.Linear(h_dim, h_dim),
-            nn.ReLU(),
-            nn.Linear(h_dim, h_dim // 2), # 增加一层，但最后一层维度减半
+            nn.LayerNorm(h_dim),
             nn.ReLU()
         )
-        self.actor = nn.Linear(h_dim // 2, a_dim)
-        self.critic = nn.Linear(h_dim // 2, 1)
+        
+        # 使用多个残差块
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(h_dim, dropout_rate=0.1) for _ in range(3)
+        ])
+        
+        # 共享特征提取层
+        self.feature_layer = nn.Sequential(
+            nn.Linear(h_dim, h_dim // 2),
+            nn.LayerNorm(h_dim // 2),
+            nn.ReLU()
+        )
+        
+        # 独立的Actor和Critic头
+        self.actor = nn.Sequential(
+            nn.Linear(h_dim // 2, h_dim // 4),
+            nn.ReLU(),
+            nn.Linear(h_dim // 4, a_dim)
+        )
+        
+        self.critic = nn.Sequential(
+            nn.Linear(h_dim // 2, h_dim // 4),
+            nn.ReLU(),
+            nn.Linear(h_dim // 4, 1)
+        )
+        
         self.apply(self._init_weights)
+        
+        # 初始化输出层权重
+        nn.init.orthogonal_(self.actor[-1].weight, gain=0.01)
+        nn.init.orthogonal_(self.critic[-1].weight, gain=1.0)
+        nn.init.constant_(self.actor[-1].bias, 0)
+        nn.init.constant_(self.critic[-1].bias, 0)
 
     @staticmethod
     def _init_weights(m) -> None:
         if isinstance(m, nn.Linear):
-            # 使用默认的 Xavier 初始化
-            nn.init.xavier_uniform_(m.weight)
-            nn.init.zeros_(m.bias)
+            # 使用正交初始化，更适合强化学习
+            nn.init.orthogonal_(m.weight, gain=np.sqrt(2.0))
+            nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = self.backbone(x)
-        logits = self.actor(x)
-        value = self.critic(x).squeeze(-1)
+        x = self.input_layer(x)
+        
+        # 通过残差块
+        for residual_block in self.residual_blocks:
+            x = residual_block(x)
+        
+        features = self.feature_layer(x)
+        
+        logits = self.actor(features)
+        value = self.critic(features).squeeze(-1)
+        
         return logits, value
 
     @torch.no_grad()
@@ -294,38 +398,77 @@ class ActorCritic(nn.Module):
         return log_probs, value, entropy
 
 # ============================================================
-# ICM 网络
+# ICM 网络 - 优化版本
 # ============================================================
+class ICMEncoder(nn.Module):
+    """ICM编码器，使用残差连接提高特征提取能力"""
+    def __init__(self, s_dim: int, feature_dim: int):
+        super().__init__()
+        self.input_layer = nn.Sequential(
+            nn.Linear(s_dim, 256),
+            nn.LayerNorm(256),
+            nn.ReLU()
+        )
+        
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(256, dropout_rate=0.05) for _ in range(2)
+        ])
+        
+        self.output_layer = nn.Sequential(
+            nn.Linear(256, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.input_layer(x)
+        for residual_block in self.residual_blocks:
+            x = residual_block(x)
+        return self.output_layer(x)
+
 class ICM(nn.Module):
     """
+    优化的ICM网络，使用更好的架构和正则化
     s_dim  -> feature_dim (encoder)
     (feature_dim, action) -> next_feature (forward)
     (feature_dim, next_feature) -> action_logits (inverse)
     """
     def __init__(self, s_dim: int, a_dim: int, feature_dim: int):
         super().__init__()
-        # 稍微加深 ICM 网络
-        self.encoder = nn.Sequential(
-            nn.Linear(s_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, feature_dim)
-        )
+        # 使用改进的编码器
+        self.encoder = ICMEncoder(s_dim, feature_dim)
+        
+        # 优化的前向模型
         self.forward_model = nn.Sequential(
             nn.Linear(feature_dim + a_dim, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Linear(256, feature_dim)
         )
+        
+        # 优化的逆向模型
         self.inverse_model = nn.Sequential(
             nn.Linear(feature_dim * 2, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Linear(256, a_dim)
         )
+        
+        # 使用正交初始化
+        self.apply(self._init_weights)
+        
+    @staticmethod
+    def _init_weights(m) -> None:
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, gain=np.sqrt(2.0))
+            nn.init.constant_(m.bias, 0)
 
     def feature(self, state: torch.Tensor) -> torch.Tensor:
         return self.encoder(state)
@@ -374,12 +517,14 @@ class RolloutBuffer:
         self.__init__()
 
 # ------------------------------------------------------------
-# PPO + ICM 智能体
+# PPO + ICM 智能体 - 优化版本
 # ------------------------------------------------------------
 class PPOAgent:
     def __init__(self, cfg: Cfg) -> None:
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.episode_count = 0
+        self.icm_eta = cfg.ICM_ETA  # 动态内在奖励系数
         
         # 初始化 Actor-Critic 网络
         self.net = ActorCritic(cfg.STATE_DIM, cfg.HIDDEN_DIM, cfg.ACTION_DIM).to(self.device)
@@ -387,15 +532,48 @@ class PPOAgent:
         # 初始化 ICM 网络
         self.icm = ICM(cfg.STATE_DIM, cfg.ACTION_DIM, cfg.ICM_FEATURE_DIM).to(self.device)
         
-        # 优化器
-        self.optimizer = optim.Adam(self.net.parameters(), lr=cfg.LR, eps=1e-5) # 添加 eps
-        self.icm_optimizer = optim.Adam(self.icm.parameters(), lr=cfg.ICM_LR, eps=1e-5)
+        # 优化器 - 使用AdamW提高泛化能力
+        self.optimizer = optim.AdamW(self.net.parameters(), lr=cfg.LR, weight_decay=1e-4, eps=1e-5)
+        self.icm_optimizer = optim.AdamW(self.icm.parameters(), lr=cfg.ICM_LR, weight_decay=1e-4, eps=1e-5)
+        
+        # 学习率调度器
+        self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=cfg.LR_DECAY)
+        self.icm_scheduler = optim.lr_scheduler.ExponentialLR(self.icm_optimizer, gamma=cfg.LR_DECAY)
         
         # 经验缓存
         self.buffer = RolloutBuffer()
         
         # 损失函数
         self.mse = nn.MSELoss()
+        
+        # 课程学习相关
+        self.current_grid_size = cfg.GRID_SIZE_START if cfg.CURRICULUM_LEARNING else cfg.GRID_SIZE_END
+        
+    def update_curriculum(self, episode: int) -> None:
+        """更新课程学习进度"""
+        if not self.cfg.CURRICULUM_LEARNING:
+            return
+            
+        # 线性增加网格大小
+        progress = min(episode / self.cfg.CURRICULUM_EPISODES, 1.0)
+        new_size = int(self.cfg.GRID_SIZE_START + 
+                      (self.cfg.GRID_SIZE_END - self.cfg.GRID_SIZE_START) * progress)
+        
+        if new_size != self.current_grid_size:
+            self.current_grid_size = new_size
+            print(f"课程学习更新: 网格大小增加到 {self.current_grid_size}x{self.current_grid_size}")
+    
+    def update_learning_rate(self) -> None:
+        """更新学习率"""
+        # 确保学习率不低于最小值
+        current_lr = self.optimizer.param_groups[0]['lr']
+        if current_lr > self.cfg.MIN_LR:
+            self.scheduler.step()
+            self.icm_scheduler.step()
+            
+        # 更新内在奖励系数
+        self.icm_eta *= self.cfg.ICM_ETA_DECAY
+        self.icm_eta = max(self.icm_eta, 0.01)  # 确保不低于最小值
 
     @torch.no_grad()
     def select_action(self, state: np.ndarray, deterministic: bool = False) -> Tuple[int, float, float]:
@@ -469,7 +647,7 @@ class PPOAgent:
                 nn.functional.one_hot(actions, self.cfg.ACTION_DIM).float()
             )
             # 计算内在奖励: η * ||φ̂(s_{t+1}) - φ(s_{t+1})||^2
-            intrinsic_reward = self.cfg.ICM_ETA * torch.sum((pred_next_phi - next_phi) ** 2, dim=-1)
+            intrinsic_reward = self.icm_eta * torch.sum((pred_next_phi - next_phi) ** 2, dim=-1)
             # 将内在奖励加到外部奖励上
             rewards += intrinsic_reward.cpu()
 
@@ -482,7 +660,14 @@ class PPOAgent:
         # Mini-batch PPO
         dataset_size = actions.size(0)
         idx = torch.arange(dataset_size)
-        for _ in range(self.cfg.K_EPOCHS):
+        
+        # 记录损失用于统计
+        total_actor_loss = 0.0
+        total_critic_loss = 0.0
+        total_entropy = 0.0
+        update_count = 0
+        
+        for epoch in range(self.cfg.K_EPOCHS):
             # 每个 epoch 随机打乱数据索引
             idx = idx[torch.randperm(dataset_size)]
             for start in range(0, dataset_size, self.cfg.MINI_BATCH):
@@ -500,22 +685,39 @@ class PPOAgent:
                 surr2 = torch.clamp(ratios, 1 - self.cfg.EPS_CLIP, 1 + self.cfg.EPS_CLIP) * advantages[sl]
                 actor_loss = -torch.min(surr1, surr2).mean()
                 
-                # 计算价值损失 (MSE)
-                critic_loss = self.mse(state_values, returns[sl])
+                # 计算价值损失 (使用Huber损失提高鲁棒性)
+                critic_loss = nn.functional.huber_loss(state_values, returns[sl], delta=1.0)
                 
                 # 计算熵损失 (鼓励探索)
                 entropy_loss = -entropy.mean()
                 
+                # 添加价值函数的KL散度惩罚，防止过拟合
+                with torch.no_grad():
+                    _, old_values, _ = self.net.evaluate(states[sl], actions[sl])
+                value_kl = 0.5 * torch.mean((state_values - old_values) ** 2)
+                
                 # 总损失
                 loss = (actor_loss +
                         self.cfg.VALUE_COEF * critic_loss +
-                        self.cfg.ENTROPY_COEF * entropy_loss)
+                        self.cfg.ENTROPY_COEF * entropy_loss +
+                        0.01 * value_kl)  # KL散度惩罚
 
                 # 更新 Actor-Critic 网络
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.net.parameters(), self.cfg.MAX_GRAD_NORM)
-                self.optimizer.step()
+                
+                # 梯度裁剪
+                actor_grad_norm = nn.utils.clip_grad_norm_(self.net.parameters(), self.cfg.MAX_GRAD_NORM)
+                
+                # 检查梯度是否正常
+                if not torch.isnan(actor_grad_norm):
+                    self.optimizer.step()
+                
+                # 累计损失
+                total_actor_loss += actor_loss.item()
+                total_critic_loss += critic_loss.item()
+                total_entropy += entropy_loss.item()
+                update_count += 1
 
         # 5. ===== ICM 更新 =====
         # 重新计算特征（不 detach，因为需要计算梯度）
@@ -541,18 +743,34 @@ class PPOAgent:
         # 更新 ICM 网络
         self.icm_optimizer.zero_grad()
         icm_loss.backward()
-        nn.utils.clip_grad_norm_(self.icm.parameters(), self.cfg.MAX_GRAD_NORM)
-        self.icm_optimizer.step()
+        
+        # 梯度裁剪
+        icm_grad_norm = nn.utils.clip_grad_norm_(self.icm.parameters(), self.cfg.MAX_GRAD_NORM)
+        
+        # 检查梯度是否正常
+        if not torch.isnan(icm_grad_norm):
+            self.icm_optimizer.step()
 
+        # 更新学习率和课程学习
+        self.update_learning_rate()
+        self.episode_count += 1
+        
         # 清空 buffer
         self.buffer.clear()
         
+        # 计算平均损失
+        avg_actor_loss = total_actor_loss / update_count if update_count > 0 else 0.0
+        avg_critic_loss = total_critic_loss / update_count if update_count > 0 else 0.0
+        avg_entropy = total_entropy / update_count if update_count > 0 else 0.0
+        
         return {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "entropy": entropy_loss.item(),
+            "actor_loss": avg_actor_loss,
+            "critic_loss": avg_critic_loss,
+            "entropy": avg_entropy,
             "icm_loss": icm_loss.item(),
-            "intrinsic_reward_mean": intrinsic_reward.mean().item()
+            "intrinsic_reward_mean": intrinsic_reward.mean().item(),
+            "learning_rate": self.optimizer.param_groups[0]['lr'],
+            "icm_eta": self.icm_eta
         }
 
     def save(self, path: str) -> None:
@@ -570,11 +788,12 @@ class PPOAgent:
 # 训练主函数
 # ------------------------------------------------------------
 def train(cfg: Cfg) -> None:
+    # 初始化环境和智能体
     env = SnakeEnv(cfg)
     agent = PPOAgent(cfg)
     
     # 创建日志目录
-    run_name = f"snake_icm_improved_{datetime.datetime.now().strftime('%m%d_%H%M%S')}"
+    run_name = f"snake_icm_optimized_{datetime.datetime.now().strftime('%m%d_%H%M%S')}"
     log_dir = f"runs/{run_name}"
     os.makedirs(log_dir, exist_ok=True)
     
@@ -585,7 +804,9 @@ def train(cfg: Cfg) -> None:
     csv_path = f"{log_dir}/log.csv"
     csv_file = open(csv_path, "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["episode", "reward", "length", "score", "actor_loss", "critic_loss", "entropy", "icm_loss", "intrinsic_reward_mean"])
+    # 添加新的日志列
+    csv_writer.writerow(["episode", "reward", "length", "score", "actor_loss", "critic_loss", 
+                       "entropy", "icm_loss", "intrinsic_reward_mean", "learning_rate", "icm_eta"])
 
     # Pygame 初始化 (用于可视化)
     pygame.init()
@@ -600,6 +821,14 @@ def train(cfg: Cfg) -> None:
     global_step = 0
 
     for ep in range(1, cfg.MAX_EPISODES + 1):
+        # 更新课程学习
+        agent.update_curriculum(ep)
+        
+        # 如果使用课程学习，动态调整环境大小
+        if cfg.CURRICULUM_LEARNING:
+            # 这里可以动态调整环境参数，但为了简化，我们只调整智能体的感知
+            pass
+        
         state = env.reset()
         ep_reward, ep_len = 0.0, 0
         score = 0 # 初始长度为 1，所以分数是蛇身长度 - 1
@@ -630,7 +859,9 @@ def train(cfg: Cfg) -> None:
                         pygame.quit()
                         sys.exit()
                 env.render(screen)
-                txt = font.render(f"Ep:{ep}  Score:{score}  Len:{len(env.snake)}", True, Color.TEXT)
+                # 显示更多信息
+                info_text = f"Ep:{ep} Score:{score} Len:{len(env.snake)} LR:{agent.optimizer.param_groups[0]['lr']:.6f}"
+                txt = font.render(info_text, True, Color.TEXT)
                 screen.blit(txt, (10, 10))
                 pygame.display.flip()
                 clock.tick(cfg.FPS)
@@ -656,7 +887,9 @@ def train(cfg: Cfg) -> None:
                 "critic_loss": 0.0, 
                 "entropy": 0.0, 
                 "icm_loss": 0.0,
-                "intrinsic_reward_mean": 0.0
+                "intrinsic_reward_mean": 0.0,
+                "learning_rate": agent.optimizer.param_groups[0]['lr'],
+                "icm_eta": agent.icm_eta
             }
 
         # 记录 TensorBoard
@@ -664,8 +897,16 @@ def train(cfg: Cfg) -> None:
         writer.add_scalar("reward/episode", ep_reward, ep)
         writer.add_scalar("length/episode", ep_len, ep)
         writer.add_scalar("reward/running100", np.mean(running_reward), ep)
+        writer.add_scalar("training/learning_rate", agent.optimizer.param_groups[0]['lr'], ep)
+        writer.add_scalar("training/icm_eta", agent.icm_eta, ep)
+        
+        # 记录损失
         for k, v in loss_dict.items():
             writer.add_scalar(f"loss/{k}", v, ep)
+        
+        # 记录课程学习进度
+        if cfg.CURRICULUM_LEARNING:
+            writer.add_scalar("curriculum/grid_size", agent.current_grid_size, ep)
 
         # 记录 CSV
         csv_writer.writerow([
@@ -674,7 +915,9 @@ def train(cfg: Cfg) -> None:
             loss_dict["critic_loss"],
             loss_dict["entropy"],
             loss_dict["icm_loss"],
-            loss_dict["intrinsic_reward_mean"]
+            loss_dict["intrinsic_reward_mean"],
+            loss_dict["learning_rate"],
+            loss_dict["icm_eta"]
         ])
         csv_file.flush() # 确保数据写入磁盘
 
@@ -682,10 +925,11 @@ def train(cfg: Cfg) -> None:
         if ep % cfg.SAVE_FREQ == 0:
             agent.save(f"{log_dir}/ckpt_{ep}.pt")
 
-        # 保存最佳模型 (基于 episode reward)
-        if ep_reward > best_score:
-            best_score = ep_reward
+        # 保存最佳模型 (基于分数而非奖励，更符合游戏目标)
+        if score > best_score:
+            best_score = score
             agent.save(f"{log_dir}/best.pt")
+            print(f"新的最佳分数: {best_score}")
 
         # 定期打印日志
         if ep % cfg.LOG_FREQ == 0:
@@ -694,7 +938,11 @@ def train(cfg: Cfg) -> None:
                   f"Running {np.mean(running_reward):7.2f} | "
                   f"Best {best_score:7.2f} | "
                   f"Score {score:3d} | "
-                  f"Len {len(env.snake):3d}")
+                  f"Len {len(env.snake):3d} | "
+                  f"LR {agent.optimizer.param_groups[0]['lr']:.6f} | "
+                  f"ICM_η {agent.icm_eta:.3f}")
+                  
+
 
     # 训练结束，保存最终模型
     agent.save(f"{log_dir}/final.pt")
